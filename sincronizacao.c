@@ -7,11 +7,11 @@
 
 
 
-int rodadas = 0, maxPedidos = 0, barAberto = 1, atendidos = 0, clientesBar = 0, semClientes = 0, novaRodada = 0;
+int rodadas = 0, maxPedidos = 0, semClientes = 0;
 sem_t* flagPedido;
-sem_t acessoPedidos, acessoProntos, acessoCont, garDisp, qtdPedido;
+sem_t acessoPedidos, acessoProntos, garDisp, qtdPedido;
 
-//srand(time);
+pthread_barrier_t novaRodada;
 
 
 struct node {
@@ -71,7 +71,7 @@ int retiraFila(Fila* f){
     Node* temp;
     int v;
     if (filaVazia(f)){
-            return -1;
+        return -1;
     }
     
     temp = f->ini;
@@ -111,21 +111,17 @@ void fazPedido(int id, int r){
 
     printf("Rodada %d: Cliente (%d) fez seu pedido\n", r, id);
     
-    sem_wait(&acessoCont);
-    atendidos++;
-    sem_post(&acessoCont);
-    
 }
 
 void esperarPedido(int id, int r){
-    // esperar o garcom dizer que o pedido do cliente X esta pronto
+
     printf("Rodada %d: Cliente (%d) vai esperar por seu pedido\n", r, id);
     sem_wait(&flagPedido[id]);
 }
 
 void recebePedido(int id, int r){
-    // retirar pedido da lista de pedidos prontos
-    while(getPrimeiro(pedidosProntos) != id); // busy waiting
+
+    while(getPrimeiro(pedidosProntos) != id); 
     sem_wait(&acessoProntos);
     int ped = retiraFila(pedidosProntos);
     sem_post(&acessoProntos);
@@ -136,38 +132,36 @@ void recebePedido(int id, int r){
 
 
 void consomePedido(int id, int r){
-    // demora entre 1 a 5 segundos para consumir a bebida
+
     printf("Rodada %d: Cliente (%d) comecou a consumir sua bebida\n", r, id);
     sleep((rand() % 5) + 1);
     printf("Rodada %d: Cliente (%d) terminou de consumir sua bebida\n", r, id);
 }
 
-int anotaPedido(int *p, int cont, int idGar){
+void anotaPedido(int *p, int idGar){
     
-    sem_wait(&acessoPedidos);
-    p[cont] = retiraFila(listaPedidos);
+    sem_wait(&acessoPedidos);   
+    *p = retiraFila(listaPedidos);
     sem_post(&acessoPedidos);
-    printf("Garcom %d atendeu o cliente %d\n", idGar, p[cont]);
-
-    return cont++;
+    printf("Garcom (%d) atendeu o cliente (%d)\n", idGar, *p);
 }
 
-void registraPedido(int* p){
+void registraPedido(int* p, int idGar){
     
     sem_wait(&acessoProntos);
-    for (int i = 0; i < maxPedidos; i++){
-       adicionaFila(pedidosProntos, p[i]);
-    }
+    
+    adicionaFila(pedidosProntos, *p);
+    printf("Garçom (%d) registrou o pedido do cliente (%d)\n", idGar, *p);
+    
     sem_post(&acessoProntos);    
     
 }
 
-void entregaPedido(int* p){
-    int a;
-    for (int i = 0; i < maxPedidos; i++){
-        a = p[i];
-        sem_post(&flagPedido[a]);
-    }
+void entregaPedido(int* p, int idGar){
+    int a = *p;
+    
+    sem_post(&flagPedido[a]);
+    printf("Garçom (%d) entregou o pedido do cliente (%d)\n", idGar, a);
     
 }
 
@@ -175,33 +169,32 @@ void entregaPedido(int* p){
 void* cliente(void* args){
     int idCliente = *(int*) args;
     int clienteRodada = 0;
+    int barAberto = 1;
+    
     while (barAberto) {
         if(rand() % 3 != 0) {
                 printf("Rodada %d: Cliente (%d) esta esperando por um garcom\n", clienteRodada, idCliente);
                 sem_wait(&garDisp);
                 fazPedido(idCliente, clienteRodada);
                 sem_post(&garDisp);
-
+                
                 esperarPedido(idCliente, clienteRodada);
                 recebePedido(idCliente, clienteRodada);
-                consomePedido(idCliente, clienteRodada);  
-
+                consomePedido(idCliente, clienteRodada);
         } else {
-            printf("Rodada %d: Cliente (%d) nao ira fazer pedido\n", clienteRodada, idCliente);
-            sem_wait(&acessoCont);
-            atendidos++;
-            sem_post(&acessoCont);
+            printf("Rodada %d: Cliente (%d) nao ira fazer pedido esta rodada\n", clienteRodada, idCliente);
         }
 
-        clienteRodada++;
         printf("Cliente (%d) esperando nova rodada\n", idCliente);
-        while(novaRodada); 
+        pthread_barrier_wait(&novaRodada);
 
+        clienteRodada++;
 
         if(clienteRodada >= rodadas) barAberto = 0;    
     }
-
+    
     sem_post(&qtdPedido);
+
     free(args);
 
     return (void*) 1;
@@ -210,29 +203,22 @@ void* cliente(void* args){
 
 void* garcom(void* args){
     int idGar = *(int*) args;
-    int meusPedido[maxPedidos];
-    int cont = 0;
+    int meusPedido;
    
     while (!semClientes){
-        printf("Garcom %d indo atender clientes\n", idGar);
         sem_wait(&qtdPedido);
-        if (!filaVazia(listaPedidos)){
-            cont = anotaPedido(meusPedido, cont, idGar);
-            if(cont < maxPedidos){ 
-                registraPedido(meusPedido);
-                entregaPedido(meusPedido);
-                cont = 0; 
-            }
+        if (filaVazia(listaPedidos)){
+            free(args);
+            return (void*) 1;
+        }
 
-            if(atendidos == clientesBar){
-                sem_wait(&acessoCont); 
-                atendidos = 0;
-                sem_post(&acessoCont);
-                novaRodada = 1;
-            }
-        }    
-   }
-
+        printf("Garcom (%d) indo atender clientes\n", idGar);
+        anotaPedido(&meusPedido,idGar);       
+        registraPedido(&meusPedido, idGar);
+        entregaPedido(&meusPedido, idGar);
+    }         
+    
+    
    free(args);
 
    return (void*) 1;
@@ -244,31 +230,38 @@ int main(int argc, char const *argv[])
     printf("Digite a quantidade de clientes, garcom, limite por garcom e rodadas gratuitas:\n");
     scanf("%d %d %d %d", &nCliente, &nGarcom, &nMaxpedidos, &nrodadas);
 
-    if(nCliente == 0){
-        semClientes = 1;
+    if(nCliente == 0 || nGarcom == 0 || nrodadas == 0 || nMaxpedidos == 0){
+        printf("Bar sem condiçoes de abrir no momento\n");
+        exit(1);
     }
 
     listaPedidos = criaFila();
     pedidosProntos = criaFila();
     rodadas = nrodadas;
     maxPedidos = nMaxpedidos;
-    clientesBar = nCliente;
     
     sem_init(&garDisp, 0, nGarcom);
     sem_init(&acessoPedidos, 0, 1);
     sem_init(&acessoProntos, 0, 1);
     sem_init(&qtdPedido, 0, 0);
-    sem_init(&acessoCont, 0, 1);
+
+    pthread_barrier_init(&novaRodada, NULL, nCliente);
 
     flagPedido = (sem_t*) malloc(sizeof(sem_t)*nCliente);
     for (int i = 0; i < nCliente; i++){
         sem_init(&flagPedido[i],0,0);
     }  
     
-
     pthread_t clientes[nCliente];
     pthread_t garcons[nGarcom];
 
+    for (int i = 0; i < nGarcom; i++){
+        int *aux = malloc(sizeof(int));
+        *aux = i;
+        if(pthread_create(&garcons[i], NULL, &garcom, aux) != 0){
+            perror("Falha ao criar thread");
+        }
+    }
 
     for (int i = 0; i < nCliente; i++){
         int *aux = malloc(sizeof(int));
@@ -278,13 +271,6 @@ int main(int argc, char const *argv[])
         }
     }
 
-    for (int i = 0; i < nGarcom; i++){
-        int *aux = malloc(sizeof(int));
-        *aux = i;
-        if(pthread_create(&garcons[i], NULL, &garcom, aux) != 0){
-            perror("Falha ao criar thread");
-        }
-    }
     
     for (int i = 0; i < nCliente; i++){
         if(pthread_join(clientes[i], NULL) != 0){
@@ -292,13 +278,16 @@ int main(int argc, char const *argv[])
         }
     }
 
-    printf("Todos os clientes sairam do bar\n");
+    printf("Todos os clientes sairam do bar\n");   
     semClientes = 1;
+    
+
     sem_destroy(&qtdPedido);
     sem_destroy(&garDisp);
     sem_destroy(&acessoPedidos);
     sem_destroy(&acessoProntos);
-    sem_destroy(&acessoCont);
+
+    pthread_barrier_destroy(&novaRodada);
 
     for (int i = 0; i < nGarcom; i++){
         if(pthread_join(garcons[i], NULL) != 0){
@@ -306,12 +295,11 @@ int main(int argc, char const *argv[])
         }
     }
     
+    printf("Todos os garçons sairam do bar\n");
+    
     
     filaLibera(listaPedidos);
-    filaLibera(pedidosProntos);
-
-   
-    
+    filaLibera(pedidosProntos);   
     
     for (int i = 0; i < nCliente; i++) {
         sem_destroy(&flagPedido[i]);
